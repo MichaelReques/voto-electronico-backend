@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Depends, HTTPException
-from fastapi.staticfiles import StaticFiles
+
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from pydantic import BaseModel
@@ -12,6 +12,17 @@ import numpy as np
 from deepface import DeepFace
 from fastapi.responses import FileResponse
 from fastapi import Form, UploadFile, File
+import cloudinary
+import cloudinary.uploader
+from dotenv import load_dotenv
+
+load_dotenv()
+
+cloudinary.config(
+    cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
+    api_key=os.getenv("CLOUDINARY_API_KEY"),
+    api_secret=os.getenv("CLOUDINARY_API_SECRET")
+)
 
 # Creamos las tablas en la base de datos
 Base.metadata.create_all(bind=engine)
@@ -21,20 +32,11 @@ app = FastAPI(
     version="1.2.0"
 )
 
-# --- CONFIGURACIÓN DE ARCHIVOS ESTÁTICOS ---
-UPLOAD_DIR = "uploads/dni_fotos"
-if not os.path.exists(UPLOAD_DIR):
-    os.makedirs(UPLOAD_DIR)
 
-PARTIDOS_DIR = "uploads/partidos"
-if not os.path.exists(PARTIDOS_DIR):
-    os.makedirs(PARTIDOS_DIR)
 
-# Mount para que el celular descargue la foto
-app.mount("/static", StaticFiles(directory=UPLOAD_DIR), name="static")
 
-# Para que la app pueda descargar las fotos de los partidos
-app.mount("/static_partidos", StaticFiles(directory=PARTIDOS_DIR), name="static_partidos")
+
+
 
 # --- Dependencia: Conexión a la BD ---
 def get_db():
@@ -71,31 +73,34 @@ class PartidoCreate(BaseModel):
 @app.post("/admin/partidos")
 def crear_partido(request: PartidoCreate, db: Session = Depends(get_db)):
     try:
+        # Decodificar imagen base64
         image_data = base64.b64decode(request.foto_base64)
-        nparr = np.frombuffer(image_data, np.uint8)
-        img   = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        nombre_archivo = f"{request.siglas.lower()}.jpg"
-        ruta_guardado  = os.path.join(PARTIDOS_DIR, nombre_archivo)
-        cv2.imwrite(ruta_guardado, img)
-        foto_url = f"/static_partidos/{nombre_archivo}"
-        # ─────────────────────────────────────────────────────────────────────
- 
+        
+        # Subir a Cloudinary
+        upload_result = cloudinary.uploader.upload(
+            image_data,
+            folder="partidos",
+            public_id=request.siglas.lower(),
+            overwrite=True
+        )
+        foto_url = upload_result["secure_url"]
+
         # Evitar duplicados por siglas
         existente = db.query(models.PartidoPolitico).filter(
             models.PartidoPolitico.siglas == request.siglas
         ).first()
         if existente:
             raise HTTPException(status_code=400, detail=f"Las siglas '{request.siglas}' ya están registradas.")
- 
+
         nuevo = models.PartidoPolitico(
-            nombre   = request.nombre,
-            siglas   = request.siglas,
-            foto_url = foto_url
+            nombre=request.nombre,
+            siglas=request.siglas,
+            foto_url=foto_url
         )
         db.add(nuevo)
         db.commit()
         return {"mensaje": "Partido registrado con éxito"}
- 
+
     except HTTPException:
         raise
     except Exception as e:
@@ -108,14 +113,14 @@ def eliminar_partido(partido_id: int, db: Session = Depends(get_db)):
     ).first()
     if not partido:
         raise HTTPException(status_code=404, detail="Partido no encontrado.")
- 
-    # Eliminar archivo local si existe
-    if partido.foto_url.startswith("/static_partidos/"):
-        nombre_archivo = partido.foto_url.replace("/static_partidos/", "")
-        ruta = os.path.join(PARTIDOS_DIR, nombre_archivo)
-        if os.path.exists(ruta):
-            os.remove(ruta)
- 
+
+    # Eliminar de Cloudinary
+    try:
+        public_id = f"partidos/{partido.siglas.lower()}"
+        cloudinary.uploader.destroy(public_id)
+    except Exception:
+        pass  # Si falla Cloudinary igual eliminamos de BD
+
     db.delete(partido)
     db.commit()
     return {"mensaje": "Partido eliminado."}
@@ -150,57 +155,38 @@ def registrar_dni(request: DNIRequest, db: Session = Depends(get_db)):
     if not request.dni.isdigit() or len(request.dni) != 8:
         raise HTTPException(status_code=400, detail="DNI inválido.")
 
-    # 2. Ruta física de la imagen del DNI
-    nombre_archivo = f"{request.dni}.jpg"
-    ruta_fisica = os.path.join(UPLOAD_DIR, nombre_archivo)
-
-    # 3. Verificar si existe la foto del DNI
-    if not os.path.exists(ruta_fisica):
-        raise HTTPException(
-            status_code=404,
-            detail=f"No se encontró la foto del DNI {request.dni} en el servidor."
-        )
-
-    # 4. Ruta pública (frontend la usa)
-    foto_oficial_path = f"/static/{nombre_archivo}"
-
-    # 5. Buscar votante en BD
+    # 2. Buscar votante en BD y verificar que tiene embedding
     votante = db.query(models.Votante).filter(
         models.Votante.dni == request.dni
     ).first()
 
-    # 6. Si no existe, crearlo
-    if not votante:
-        votante = models.Votante(
-            dni=request.dni,
-            huella_validada=False,
-            rostro_validado=False,
-            ha_votado=False
+    if not votante or votante.face_embedding is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No se encontró registro biométrico para el DNI {request.dni}."
         )
-        db.add(votante)
 
-    else:
-        # 7. Bloquear doble voto
-        if votante.ha_votado:
-            raise HTTPException(
-                status_code=403,
-                detail="Este DNI ya emitió su voto."
-            )
+    # 3. Bloquear doble voto
+    if votante.ha_votado:
+        raise HTTPException(
+            status_code=403,
+            detail="Este DNI ya emitió su voto."
+        )
 
-        # 8. Reset biométrico (nuevo intento de validación)
-        votante.huella_validada = False
-        votante.rostro_validado = False
+    # 4. Reset biométrico (nuevo intento de validación)
+    votante.huella_validada = False
+    votante.rostro_validado = False
 
     db.commit()
     db.refresh(votante)
 
-    # 9. Respuesta al frontend
+    # 5. Respuesta al frontend
     return {
         "mensaje": "DNI reconocido correctamente",
         "votante_id": votante.id,
         "datos_oficiales": {
             "dni": request.dni,
-            "foto_oficial_url": foto_oficial_path,
+            "foto_oficial_url": votante.foto_url or "",
             "nombre_simulado": "CIUDADANO REGISTRADO"
         }
     }
@@ -208,7 +194,6 @@ def registrar_dni(request: DNIRequest, db: Session = Depends(get_db)):
 @app.get("/admin/verificaciones-faciales")
 def listar_verificaciones(db: Session = Depends(get_db)):
     votantes = db.query(models.Votante).all()
-
     return [
         {
             "id": v.id,
@@ -216,7 +201,7 @@ def listar_verificaciones(db: Session = Depends(get_db)):
             "rostro_validado": v.rostro_validado,
             "huella_validada": v.huella_validada,
             "ha_votado": v.ha_votado,
-            "foto_url": f"/static/{v.dni}.jpg"
+            "foto_url": v.foto_url  # 👈 debe ser esto, no f"/static/{v.dni}.jpg"
         }
         for v in votantes
     ]
@@ -270,7 +255,7 @@ def verificar_rostro(request: RostroRequest, db: Session = Depends(get_db)):
             np.array(current) - np.array(stored)
         )
 
-        match = distancia < 10  # umbral estable para embeddings
+        match = distancia < 25 # umbral estable para embeddings
 
         if match:
             votante.rostro_validado = True
@@ -279,6 +264,8 @@ def verificar_rostro(request: RostroRequest, db: Session = Depends(get_db)):
         else:
             raise HTTPException(status_code=401, detail="Rostro no coincide.")
 
+    except HTTPException:
+        raise
     except Exception as e:
         print("ERROR BIOMETRÍA:", str(e))
         raise HTTPException(status_code=500, detail="Error en reconocimiento facial")
@@ -336,13 +323,55 @@ def subir_foto_dni(
     if not dni.isdigit() or len(dni) != 8:
         raise HTTPException(status_code=400, detail="DNI inválido")
 
-    nombre_archivo = f"{dni}.jpg"
-    ruta = os.path.join(UPLOAD_DIR, nombre_archivo)
+    image_data = file.file.read()
+    nparr = np.frombuffer(image_data, np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-    with open(ruta, "wb") as buffer:
-        buffer.write(file.file.read())
+    if img is None:
+        raise HTTPException(status_code=400, detail="Imagen inválida")
 
-    return {
-        "mensaje": "Foto DNI guardada correctamente",
-        "ruta": f"/static/{nombre_archivo}"
-    }
+    try:
+        import pickle
+
+        # Subir foto a Cloudinary
+        upload_result = cloudinary.uploader.upload(
+            image_data,
+            folder="dni_fotos",
+            public_id=dni,
+            overwrite=True
+        )
+        foto_url = upload_result["secure_url"]
+
+        # Generar embedding facial
+        embedding = DeepFace.represent(
+            img_path=img,
+            model_name="Facenet512",
+            detector_backend="opencv",
+            enforce_detection=True
+        )[0]["embedding"]
+
+        # Buscar o crear votante
+        votante = db.query(models.Votante).filter(
+            models.Votante.dni == dni
+        ).first()
+
+        if not votante:
+            votante = models.Votante(
+                dni=dni,
+                huella_validada=False,
+                rostro_validado=False,
+                ha_votado=False,
+                face_embedding=pickle.dumps(embedding),
+                foto_url=foto_url
+            )
+            db.add(votante)
+        else:
+            votante.face_embedding = pickle.dumps(embedding)
+            votante.foto_url = foto_url
+
+        db.commit()
+        return {"mensaje": f"Foto del DNI {dni} procesada correctamente", "foto_url": foto_url}
+
+    except Exception as e:
+        print("ERROR DETALLADO:", str(e))
+        raise HTTPException(status_code=500, detail=f"Error procesando imagen: {str(e)}")

@@ -846,7 +846,7 @@
 
     <script>
       // ── CONFIGURACIÓN ──────────────────────────────────────────
-      const BASE_URL = "http://192.168.1.36:8000";
+      const BASE_URL = "http://localhost:8000";
       const ADMIN_USR = "admin"; // cambia esto
       const ADMIN_PWD = "onpe2024"; // cambia esto
 
@@ -1002,7 +1002,7 @@
           document.getElementById("tbody-facial").innerHTML = facial.map(v => `
             <tr>
                 <td>${v.dni}</td>
-                <td><img src="${BASE_URL}${v.foto_url}" class="partido-logo"></td>
+                <td><img src="${v.foto_url}" class="partido-logo" onerror="this.style.display='none'"></td>
                 <td>${v.rostro_validado ? "✅" : "❌"}</td>
                 <td>${v.huella_validada ? "✅" : "❌"}</td>
                 <td>${v.ha_votado ? "🗳️" : "—"}</td>
@@ -1044,9 +1044,9 @@
       <tr>
         <td>
           <img class="partido-logo"
-               src="${BASE_URL}${p.foto_url}"
-               onerror="this.style.display='none'"
-               alt="${p.siglas}">
+            src="${p.foto_url}"
+            onerror="this.style.display='none'"
+            alt="${p.siglas}">
         </td>
         <td>${p.nombre}</td>
         <td><span class="siglas-chip">${p.siglas}</span></td>

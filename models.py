@@ -16,13 +16,11 @@ class Votante(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     dni = Column(String, unique=True, index=True)
-    # Estados de validación multifactor
     huella_validada = Column(Boolean, default=False)
     rostro_validado = Column(Boolean, default=False)
     ha_votado = Column(Boolean, default=False)
-
-    # embedding facial
     face_embedding = Column(LargeBinary, nullable=True)
+    foto_url = Column(String, nullable=True)  # 👈 agrega esta línea
 
 class Voto(Base):
     __tablename__ = "votos"
