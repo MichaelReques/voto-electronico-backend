@@ -9,7 +9,7 @@ import os
 import base64
 import cv2
 import numpy as np
-from deepface import DeepFace
+
 from fastapi.responses import FileResponse
 from fastapi import Form, UploadFile, File
 import cloudinary
@@ -227,6 +227,7 @@ def verificar_rostro(request: RostroRequest, db: Session = Depends(get_db)):
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
     try:
+        from deepface import DeepFace
         # 🔥 obtener embedding del rostro actual
         current = DeepFace.represent(
             img_path=img,
@@ -332,7 +333,7 @@ def subir_foto_dni(
 
     try:
         import pickle
-
+        from deepface import DeepFace
         # Subir foto a Cloudinary
         upload_result = cloudinary.uploader.upload(
             image_data,
